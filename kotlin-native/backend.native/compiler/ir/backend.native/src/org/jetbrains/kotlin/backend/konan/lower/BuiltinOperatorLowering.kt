@@ -16,6 +16,7 @@ import org.jetbrains.kotlin.ir.builders.*
 import org.jetbrains.kotlin.ir.declarations.IrClass
 import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
 import org.jetbrains.kotlin.ir.declarations.IrFile
+import org.jetbrains.kotlin.ir.declarations.IrVariable
 import org.jetbrains.kotlin.ir.descriptors.IrBuiltinOperatorDescriptor
 import org.jetbrains.kotlin.ir.expressions.IrCall
 import org.jetbrains.kotlin.ir.expressions.IrExpression
@@ -145,9 +146,31 @@ internal class BuiltinOperatorLowering(val context: NativeLoweringContext) : Fil
         return when (lhsBinaryType) {
             is BinaryType.Primitive -> {
                 val areEqualByValue = symbols.areEqualByValue[lhsBinaryType.type]!!.owner
-                irCall(areEqualByValue).apply {
-                    arguments[0] = reinterpret(lhs, areEqualByValue.parameters[0].type)
-                    arguments[1] = reinterpret(rhs, areEqualByValue.parameters[1].type)
+                val lhsValue = reinterpret(lhs, areEqualByValue.parameters[0].type)
+                val rhsValue = reinterpret(rhs, areEqualByValue.parameters[1].type)
+                if (lhsBinaryType.type == PrimitiveBinaryType.FLOAT || lhsBinaryType.type == PrimitiveBinaryType.DOUBLE) {
+                    // Compare by bits to distinguish signed zeros, but consider all NaNs equal.
+                    irBlock {
+                        val lhsTemp = irTemporary(lhsValue)
+                        val rhsTemp = irTemporary(rhsValue)
+                        val ieee754Equals = selectIntrinsic(symbols.ieee754Equals, lhsTemp.type, rhsTemp.type, false)!!
+
+                        fun isNaN(value: IrVariable) = irNot(irCall(ieee754Equals).apply {
+                            arguments[0] = irGet(value)
+                            arguments[1] = irGet(value)
+                        })
+
+                        +context.oror(
+                                irCall(areEqualByValue).apply {
+                                    arguments[0] = irGet(lhsTemp)
+                                    arguments[1] = irGet(rhsTemp)
+                                },
+                                context.andand(isNaN(lhsTemp), isNaN(rhsTemp))
+                        )
+                    }
+                } else irCall(areEqualByValue).apply {
+                    arguments[0] = lhsValue
+                    arguments[1] = rhsValue
                 }
             }
 
